@@ -1,972 +1,933 @@
-<?php
-ob_start();
-mkdir('data');
-mkdir('data/id');
-mkdir('data/txt');
-$API_KEY= '7551504466:AAGpy3-hZKM0ZTDky5KYtJMPgprdwsJz6h0';
-define('API_KEY',$API_KEY);
-echo file_get_contents("https://api.telegram.org/bot" . API_KEY . "/setwebhook?url=" . $_SERVER['SERVER_NAME'] . "" . $_SERVER['SCRIPT_NAME']);
-function bot($method,$datas=[]){
-$amrakl = http_build_query($datas);
-$url = "https://api.telegram.org/bot".API_KEY."/".$method."?$amrakl";
-$amrakl = file_get_contents($url);
-return json_decode($amrakl);
-}
+import os
+import sqlite3
+import requests
+import zipfile
+import tempfile
+import logging
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    CallbackQueryHandler,
+    JobQueue
+)
 
-$update = json_decode(file_get_contents('php://input'));
-$message = $update->message;
-$chat_id = $message->chat->id;
-$text = $message->text;
-$message_id = $message->message_id;
-$id = $message->from->id;
-if($update->callback_query){
-$id                                   = $update->callback_query->message->chat->id;
-}else{
-$id           						= $update->message->chat->id;
-}
-if(isset($update->callback_query)){
-$chat_id = $update->callback_query->message->chat->id;
-$message_id = $update->callback_query->message->message_id;
-$data = $update->callback_query->data;
-$user = $update->callback_query->from->username;
-$first = $update->callback_query->from->first_name;
-}
+# ------------------- إعدادات البوت -------------------
+BOT_TOKEN = "7865309137:AAHsUzdVldTzAQinr1AUrhxNotm5O1QJ7xg"
+ADMIN_ID = 7627857345
+DB_NAME = "bot_database.db"
+REQUEST_TIMEOUT = 30
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+DAILY_LIMIT = 5  # الحد اليومي للاستخدام
+REFERRAL_REWARD = 10  # نقاط المكافأة لكل إحالة
 
+# إعدادات Callback
+CALLBACK_POINTS = "user_points"
+CALLBACK_INVITE = "user_invite"
+CALLBACK_STATS = "user_stats"
+CALLBACK_ADMIN_STATS = "admin_stats"
+CALLBACK_ADMIN_BROADCAST = "admin_broadcast"
+CALLBACK_ADMIN_CHANNELS = "admin_channels"
+CALLBACK_ADMIN_USERS = "admin_users"
+CALLBACK_BAN_USER = "ban_user"
+CALLBACK_UNBAN_USER = "unban_user"
+CALLBACK_ADD_CHANNEL = "add_channel"
+CALLBACK_REMOVE_CHANNEL = "remove_channel"
+CALLBACK_CONFIRM_BROADCAST = "confirm_broadcast"
+CALLBACK_CANCEL_BROADCAST = "cancel_broadcast"
 
-#=================={        مهم.        }================#
-#=================={بيانات حسابك والقنوات}================#
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
-$me = bot('getme',['bot'])->result->username;
-$bot="GG PHONE";// لازم تحط اسم مجلد بوتك الي فيه ملفات البوت مهم
-$bot_name="GG PHONE";// حط اسم بوتك الي بيضهر للمستخدمين 
-$profit_price_sale = 20; // هنا حدد نسبة الربح عندما تبيع للمستخدمين
-$Free=0.001;//نسبة ربح رابط الدعوة
-#=========={القنوات الادمن وبيانات حسابك في TG-Lion}=========#
-$apiKay_Lion= "nMmim07nyz9baDk4Cc"; # هنا ضع مفتاح api الخاص بك في TG-Lion
-$Your_ID=7558300112; # هنا ضع ايدي حسابك في TG-Lion
-$sim =-1002347463821; #هنا ضع القناة الاشتراك الاجباري
-$PAY =-1002609244169; # هنا ضع الارقام المكتملة الناجحه الخاصة بالإدارة
-$activation=-1002609093313; # هنا ضع قناة التفعيلات
-$tele =-1002555864273; # هنا ضع قناة تخزين ارقام تلي
-$buy_out =-1002515723864; # هنا ضع عمليات تسجيل الخروج والشراء الخاص بالادارة
-$system  =-1002520487481; # هنا ضع اشعارات الدخول والتحويلات اشعارات النظام
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
-#====================================================#
+# إعداد التسجيل
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
+# ------------------- قاعدة البيانات -------------------
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # جدول المستخدمين
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        join_date TEXT,
+        points INTEGER DEFAULT 0,
+        is_banned INTEGER DEFAULT 0,
+        last_used TEXT,
+        usage_count INTEGER DEFAULT 0,
+        referral_code TEXT UNIQUE,
+        referrals_count INTEGER DEFAULT 0
+    )''')
+    
+    # جدول الإحالات
+    cursor.execute('''CREATE TABLE IF NOT EXISTS referrals (
+        referrer_id INTEGER,
+        referred_id INTEGER,
+        date TEXT,
+        PRIMARY KEY (referrer_id, referred_id)
+    )''')
+    
+    # جدول القنوات
+    cursor.execute('''CREATE TABLE IF NOT EXISTS channels (
+        channel_id INTEGER PRIMARY KEY,
+        username TEXT,
+        title TEXT,
+        added_by INTEGER,
+        add_date TEXT
+    )''')
+    
+    # جدول البث
+    cursor.execute('''CREATE TABLE IF NOT EXISTS broadcasts (
+        broadcast_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id INTEGER,
+        message TEXT,
+        sent_date TEXT,
+        users_count INTEGER
+    )''')
+    
+    conn.commit()
+    conn.close()
 
+init_db()
 
+# ------------------- الوظائف المساعدة -------------------
+def get_db_connection():
+    return sqlite3.connect(DB_NAME)
 
-#=========={التخزينات}==========#
-function Numbers($array){
-file_put_contents('data/number.json', json_encode($array,64|128|256));
-}
-// مسارات ووضائف اخرى
-$step = file_get_contents("data/id/$id/step.txt");
-$exstep=explode("|", $step);
-$extext = explode("\n", $text);
-$ex_text=explode(" ", $text);
-$exdata=explode("-", $data);
-$tele_number = json_decode(file_get_contents('data/number.json'),true);
-$mr = json_decode(file_get_contents("ID/$chat_id/$points.txt"),true);
-$Balance = file_get_contents("ID/$chat_id/points.txt"); #رصيد العضو#
-if($Balance==null){
-$Balance=0;
-}
-if(!is_dir("data/id/$id")){
-mkdir("data/id/$id");
-}
-if(!is_dir("ID/$chat_id")){
-mkdir("ID/$chat_id");
-file_put_contents("ID/$chat_id/points.txt", 0);
-bot('sendMessage',[
-'chat_id'=>$system,
-'text'=>"
-تم دخول عميل جديد ✅
-- العميل: $first
-- الايدي: `$chat_id`
-- يوزرة: $user
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>"تواصل مع العميل",'url'=>"tg://openmessage?user_id=$id"]]
-]
-])
-]);
-$chal=file_get_contents("data/id/$id/lift.txt");
-if($chal !="close" and $chal != $id){
-$cc = $ex_text[1]; 
-file_put_contents("data/id/$id/lift.txt", $cc);
-}
-}
+def get_user(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    columns = [column[0] for column in cursor.description]
+    user = cursor.fetchone()
+    conn.close()
+    return dict(zip(columns, user)) if user else None
 
-#=========={الإشتراك الإجباري}==========#
-$status = bot('getChatMember',['chat_id'=>$sim,'user_id'=>$chat_id])->result->status;
-if($data == null and $status == 'left'){
-bot('sendMessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-⚠️ عزيزي المستخدم يجب عليك الإشتراك في قناة البوت لتتمكن من معرفة كل جديد
-",
-'reply_to_message_id'=>$message_id,
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([ 
-'inline_keyboard'=>[ 
-[['text'=>"قناة التفعيلات",'url'=>"https://t.me/TG_LionAPI"]]
-]
-])
-]);
-exit;
-}
-if($data != null and $status == 'left'){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-⚠️ عزيزي المستخدم يجب عليك الإشتراك في قناة البوت لتتمكن من معرفة كل جديد
-",
-'reply_to_message_id'=>$message_id,
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([ 
-'inline_keyboard'=>[ 
-[['text'=>"قناة التفعيلات",'url'=>"https://t.me/TG_LionAPI"]]
-]
-])
-]);
-exit;
-}
+def add_user(user):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        referral_code = f"REF-{user.id}"
+        cursor.execute('''
+            INSERT OR IGNORE INTO users 
+            (user_id, username, first_name, last_name, join_date, referral_code) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user.id, user.username, user.first_name, user.last_name, datetime.now().isoformat(), referral_code))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error adding user: {e}")
+    finally:
+        conn.close()
 
-#=========={القائمة الرئيسيه}==========#1
-// قائمة رئيسية 1
-if($ex_text[0] == '/start'){
-bot('sendMessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-🏡: مرحبا بكم في بوت $bot_name
+def update_user(user_id, **kwargs):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    set_clause = ", ".join([f"{key} = ?" for key in kwargs])
+    values = list(kwargs.values()) + [user_id]
+    try:
+        cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", values)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error updating user: {e}")
+    finally:
+        conn.close()
 
-- ايدي حسابك: `$id`
-- رصيد حسابك: $$Balance
-- مستوى حسابك: VIP1
+def can_use_bot(user_id):
+    user = get_user(user_id)
+    if not user:
+        return False
+    
+    if user['is_banned']:
+        return False
+    
+    if user['last_used']:
+        last_used = datetime.fromisoformat(user['last_used'])
+        if (datetime.now() - last_used) < timedelta(days=1):
+            return user['usage_count'] < DAILY_LIMIT
+    return True
 
-💻 تحكم بالبوت عبر الأزرار في الأسفل:
-",
-'parse_mode' => "MarkDown",
-'reply_markup' => json_encode([
-'inline_keyboard' => [
-[['text' => 'شراء حسابات تلجرام جاهزه', 'callback_data' => "Buyxvx"]], 
-[['text' => 'رصيد مجانا', 'callback_data' => "assignment"], ['text' => "شحن رصيدك", 'url' => "tg://user?id=$Your_ID"]],
-[['text' => 'حسابي', 'callback_data' => "myaca"], ['text' => "قناة التفعيلات", 'url' => "https://t.me/TG_LionAPI"]],
-[['text' => 'تحويل رصيد', 'callback_data' => "SendCoin"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-$chal=file_get_contents("data/id/$id/lift.txt");
-if($chal != null and $chal != $chat_id and $chal !="close"){
-bot('sendMessage',[
-'chat_id'=>$chal,
-'text'=>"
-• قام شخص جديد باستخدام رابط إحالتك  
-• ولقد ربحت $Free دولار
-",
-'parse_mode'=>"MarkDown",
-]);
-$points = file_get_contents("ID/$chal/points.txt");
-$aa = $points + $Free;
-file_put_contents("ID/$chal/points.txt",$aa);
-file_put_contents("data/id/$id/lift.txt","close");// علشان تضمن مايقدر يربح مرة ثاني
-}
-exit;
-}
-#=========={القائمة الرئيسيه}==========#2
-if($text == '/start'){
-bot('sendMessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-🏡: مرحبا بكم في بوت $bot_name
+def record_usage(user_id):
+    user = get_user(user_id)
+    if not user:
+        return
+    
+    if user['last_used']:
+        last_used = datetime.fromisoformat(user['last_used'])
+        if (datetime.now() - last_used) >= timedelta(days=1):
+            update_user(user_id, usage_count=1, last_used=datetime.now().isoformat())
+        else:
+            update_user(user_id, usage_count=user['usage_count']+1, last_used=datetime.now().isoformat())
+    else:
+        update_user(user_id, usage_count=1, last_used=datetime.now().isoformat())
 
-- ايدي حسابك: `$id`
-- رصيد حسابك: $$Balance
-- مستوى حسابك: VIP1
+# ------------------- نظام الإحالات والنقاط -------------------
+async def handle_referral(user, referrer_id, context):
+    if referrer_id == user.id:
+        return False
 
-💻 تحكم بالبوت عبر الأزرار في الأسفل:
-",
-'parse_mode' => "MarkDown",
-'reply_markup' => json_encode([
-'inline_keyboard' => [
-[['text' => 'شراء حسابات تلجرام جاهزه', 'callback_data' => "Buyxvx"]], 
-[['text' => 'رصيد مجانا', 'callback_data' => "assignment"], ['text' => "شحن رصيدك", 'url' => "tg://user?id=$Your_ID"]],
-[['text' => 'حسابي', 'callback_data' => "myaca"], ['text' => "قناة التفعيلات", 'url' => "https://t.me/TG_LionAPI"]],
-[['text' => 'تحويل رصيد', 'callback_data' => "SendCoin"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-#=========={القائمة الرئيسية}==========#3
-if($data == "back"){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-🏡: مرحبا بكم في بوت $bot_name
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM referrals WHERE referred_id = ?", (user.id,))
+        if cursor.fetchone():
+            return False
+        
+        cursor.execute('''
+            INSERT INTO referrals (referrer_id, referred_id, date)
+            VALUES (?, ?, ?)
+        ''', (referrer_id, user.id, datetime.now().isoformat()))
+        
+        cursor.execute('''
+            UPDATE users 
+            SET points = points + ?,
+                referrals_count = referrals_count + 1
+            WHERE user_id = ?
+        ''', (REFERRAL_REWARD, referrer_id))
+        
+        conn.commit()
+        
+        try:
+            await context.bot.send_message(
+                chat_id=referrer_id,
+                text=f"🎉 أحالك {user.first_name} وحصلت على {REFERRAL_REWARD} نقاط!"
+            )
+        except Exception as e:
+            logger.error(f"Error sending referral notification: {e}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error handling referral: {e}")
+        return False
+    finally:
+        conn.close()
 
-- ايدي حسابك: `$id`
-- رصيد حسابك: $$Balance دولار
-- مستوى حسابك: VIP1
+# ------------------- نظام الحظر/فك الحظر -------------------
+async def ban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ هذا الأمر للمشرف فقط!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ يرجى تحديد ID المستخدم\nمثال: /ban 123456789")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        update_user(user_id, is_banned=1)
+        await update.message.reply_text(f"✅ تم حظر المستخدم {user_id} بنجاح")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {str(e)}")
 
-💻 تحكم بالبوت عبر الأزرار في الأسفل:
-",
-'parse_mode' => "MarkDown",
-'reply_markup' => json_encode([
-'inline_keyboard' => [
-[['text' => 'شراء حسابات تلجرام جاهزه', 'callback_data' => "Buyxvx"]], 
-[['text' => 'رصيد مجانا', 'callback_data' => "assignment"], ['text' => "شحن رصيدك", 'url' => "tg://user?id=$Your_ID"]],
-[['text' => 'حسابي', 'callback_data' => "myaca"], ['text' => "قناة التفعيلات", 'url' => "https://t.me/TG_LionAPI"]],
-[['text' => 'تحويل رصيد', 'callback_data' => "SendCoin"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-}
+async def unban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ هذا الأمر للمشرف فقط!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ يرجى تحديد ID المستخدم\nمثال: /unban 123456789")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        update_user(user_id, is_banned=0)
+        await update.message.reply_text(f"✅ تم فك حظر المستخدم {user_id} بنجاح")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {str(e)}")
 
-if($exdata[0] == "YSg" or $exdata[0] == "YSb"){
-if($exdata[1] > $Balance or $Balance < $exdata[1]){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- رصيدك غير كافي رصيدك الحالي $Balance دولار",
-'show_alert'=>false,
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-}
-#=========={الإحالات}===========#
-if($data == "assignment"){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-شارك رابط الدعوة الخاص بك مع أصدقائك او قنواتك او اي مكان واحصل على $assignru دولار مجاناً لكل شخص يقوم بالدخول عبر رابطك تربح $$Free
+# ------------------- نظام استخراج المواقع -------------------
+async def scrape_website(url, user_id):
+    try:
+        # إنشاء مجلد مؤقت
+        temp_dir = tempfile.mkdtemp(prefix=f"bot_{user_id}_")
+        logger.info(f"Created temp dir: {temp_dir}")
+        
+        # تحميل الصفحة
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        
+        # حفظ الملف الرئيسي
+        index_path = os.path.join(temp_dir, "index.html")
+        with open(index_path, 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        
+        # إنشاء ملف ZIP
+        zip_path = os.path.join(temp_dir, "website.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(index_path, "index.html")
+        
+        return zip_path
+    except Exception as e:
+        logger.error(f"Error scraping website: {e}")
+        raise Exception(f"❌ فشل في استخراج الموقع: {str(e)}")
 
-https://t.me/$me?start=$id
-",
-'parse_mode'=>"html",
-'disable_web_page_preview'=>true,
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'backk']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-}
+# ------------------- معالجة الأزرار -------------------
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        if query.data == CALLBACK_POINTS:
+            await show_points(update, context)
+        elif query.data == CALLBACK_INVITE:
+            await show_invite(update, context)
+        elif query.data == CALLBACK_STATS:
+            await show_stats(update, context)
+        elif query.data == CALLBACK_ADMIN_STATS:
+            await admin_stats(update, context)
+        elif query.data == CALLBACK_ADMIN_BROADCAST:
+            await admin_broadcast_menu(update, context)
+        elif query.data == CALLBACK_ADMIN_CHANNELS:
+            await admin_channels_menu(update, context)
+        elif query.data == CALLBACK_ADMIN_USERS:
+            await admin_users_menu(update, context)
+        elif query.data.startswith(CALLBACK_BAN_USER):
+            user_id = int(query.data.split('_')[-1])
+            update_user(user_id, is_banned=1)
+            await query.edit_message_text(f"✅ تم حظر المستخدم {user_id}")
+        elif query.data.startswith(CALLBACK_UNBAN_USER):
+            user_id = int(query.data.split('_')[-1])
+            update_user(user_id, is_banned=0)
+            await query.edit_message_text(f"✅ تم فك حظر المستخدم {user_id}")
+        elif query.data == CALLBACK_ADD_CHANNEL:
+            await add_channel_prompt(update, context)
+        elif query.data == CALLBACK_REMOVE_CHANNEL:
+            await remove_channel_menu(update, context)
+        elif query.data.startswith("remove_channel_"):
+            channel_id = int(query.data.split('_')[-1])
+            await remove_channel(update, context, channel_id)
+        elif query.data == CALLBACK_CONFIRM_BROADCAST:
+            await send_broadcast(update, context)
+        elif query.data == CALLBACK_CANCEL_BROADCAST:
+            await cancel_broadcast(update, context)
+    except Exception as e:
+        logger.error(f"Error in button handler: {e}")
+        await query.edit_message_text("⚠️ حدث خطأ أثناء معالجة الطلب")
 
-#=========={تحويل دولار لمستخدم اخر}=========#
-if($data == "SendCoin"){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-قم بإرسال ID العميل الذي تريد تحويل الاموال الية
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'back']]
-]
-])
-]);
-file_put_contents("data/id/$id/step.txt","se");
-}
-if($text !== '/start' and $text !== null and $step == 'se'){
-$idEM = $text;
-$ttt = json_decode(file_get_contents("ID/$idEM/points.txt"),true);
-if (!isset($ttt)) {
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- عذرا هاذا المستخدم غير موجود في الروبوت
-",
-'parse_mode'=>"html",
-'reply_to_message_id'=>$message_id,
-]);
-exit;
-}elseif($idEM == $id){
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- عذرا عزيزي العميل لايمكنك التحويل لنفس لحسابك
-",
-'parse_mode'=>"html",
-'reply_to_message_id'=>$message_id,
-]);
-}else{
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- إرسل عدد الدولارات اللتي تريد تحويلها لهذا المستخدم
-",
-'reply_to_message_id'=>$message_id,
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'SendCoin']]
-]
-])
-]);
-file_put_contents("data/id/$id/step.txt","ce|$text");
-exit;
-}
-}
-if($text !== '/start' and $text !== null and $exstep[0] == 'ce'){
-$idEM=$exstep[1];
-$price = $text;
-if($price > $Balance){
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- رصيدك غير كافي 
-- رصيدك الحالي $Balance 
-",
-'reply_to_message_id'=>$message_id,
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'SendCoin']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}elseif(0.01 > $price){
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- عذرا الحد الادنى 0.01 دولار
-",
-'reply_to_message_id'=>$message_id,
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'SendCoin']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}elseif($price <= $Balance){
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>" 
-- هل أنت متأكد من شحن $ $price دولار: 
-- ايدي المستخدم: $idEM 
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'نعم','callback_data'=>"YSb-$price-$idEM"]],
-[['text'=>'رجوع','callback_data'=>'SendCoin']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}else{
-bot('sendmessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-- رصيدك غير كافي 
-- رصيدك الحالي $Balance دولار
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'back']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-}
-if($exdata[0] == "YSb"){
-$price = $exdata[1];
-$idEM = $exdata[2];
-$sendbot2=$sendbot+1;
-$ms = file_get_contents("ID/$idEM/points.txt");// مسار رصيد المستلم
-$mr = file_get_contents("ID/$id/points.txt");// مسار رصيد المرسل
-$msp = $ms + $price;
-$mrp = $mr-$price;
-if($price == null){
-exit;
-}else{
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-- تم خصم $$price من رصيدك وتم تحويلها إلى $idEM ✅
+# ------------------- أوامر المستخدمين -------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    add_user(user)
+    
+    # معالجة الإحالة
+    if context.args and context.args[0].isdigit():
+        referrer_id = int(context.args[0])
+        await handle_referral(user, referrer_id, context)
+    
+    # عرض القائمة الرئيسية
+    user_data = get_user(user.id)
+    remaining = DAILY_LIMIT - (user_data['usage_count'] if user_data and user_data['last_used'] and 
+                              (datetime.now() - datetime.fromisoformat(user_data['last_used'])) < timedelta(days=1) else 0)
+    
+    keyboard = [
+        [InlineKeyboardButton("⚡ استخراج موقع", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("📊 إحصائياتي", callback_data=CALLBACK_STATS),
+         InlineKeyboardButton("🎁 نقاطي", callback_data=CALLBACK_POINTS)],
+        [InlineKeyboardButton("👥 دعوة أصدقاء", callback_data=CALLBACK_INVITE)]
+    ]
+    
+    if user.id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("👨‍💻 لوحة الأدمن", callback_data="admin_panel")])
+    
+    text = f"""
+✨ مرحباً {user.first_name}!
 
-- عمولة التحويل: 0$
-- رصيدك المتبقي: $mrp دولار
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'back']]
-]
-])
-]);
-bot('sendmessage',[
-'chat_id'=>$idEM,
-'text'=>"
-- تم شحن  $price دولار الى حسابك ✅.
-- تم الشحن من  $id
-- رصيدك الحالي  $msp دولار
-",
-'disable_web_page_preview'=>true,
-'parse_mode'=>"MarkDown",
-]);
-bot('sendmessage',[
-'chat_id'=>$system,
-'text'=>"
-⚜️ عملية تحويل دولار بين مستخدمين:
+• النقاط: {user_data['points'] if user_data else 0}
+• المحاولات المتبقية: {remaining}/{DAILY_LIMIT}
+• عدد الأحالات: {user_data['referrals_count'] if user_data else 0}
 
-🙈 - المرسل: $id
-🙈 - المستلم: $idEM
-💰- عدد الدولارات : $price
-🤖 - رسوم التحويل : $0
-🏧 - تاريخ : date('Y-m-d H:i:s')
-➖ - رصيد المرسل بعد التحويل : $mrp
-➖ - رصيد المستلم بعد التحويل : $msp
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>"المرسل",'url'=>"tg://openmessage?user_id=$id"]],
-[['text'=>"المستلم",'url'=>"tg://openmessage?user_id=$idEM"]]
-]
-])
-]);
-$ms = file_get_contents("ID/$idEM/points.txt");// مسار رصيد المستلم
-$mr = file_get_contents("ID/$id/points.txt");// مسار رصيد المرسل
-$ok = $mr - $price;
-file_put_contents("ID/$chat_id/points.txt",$ok);
-$ok = $ms + $price;
-file_put_contents("ID/$idEM/points.txt",$ok);
-unlink("data/id/$id/step.txt");
-}
-}
+اختر أحد الخيارات:
+"""
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# قسم بيانات حساب المستخدم
-if($data == "myaca"){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-✅:مرحبا هذه معلومات وبيانات حسابك.
+async def show_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = get_user(query.from_user.id)
+    points = user['points'] if user else 0
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
+    ]
+    
+    await query.edit_message_text(
+        f"🎁 نقاطك الحالية: {points}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-- أيدي حسابك: $id
-- رصيد الحساب: $Balance دولار
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'رجوع','callback_data'=>'back']]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
+async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = get_user(query.from_user.id)
+    referral_code = user['referral_code'] if user else f"REF-{query.from_user.id}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
+    ]
+    
+    invite_link = f"https://t.me/your_bot_username?start={query.from_user.id}"
+    text = f"""
+👥 دعوة الأصدقاء
 
-#=========={قائمة شراء حساب}==========#1
-if($data=="Buyxvx"){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-💚 شراء حسابات Telegram جاهزة
+رابط الدعوة الخاص بك:
+{invite_link}
 
-➖ يمكنك شراء حساب تلجرام بضغطة زر
-➖ يمكنك طلب عدة اكواد للحساب مجانا •
-➖ رصيد حسابك: $Balance دولار •
+كود الإحالة: {referral_code}
 
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'السيـرفر 1','callback_data'=>"Buynumtele2-1"]],
-[['text'=>'السيـرفر 2','callback_data'=>"Buynumtele2-2"]],
-[['text'=>'رجوع','callback_data'=>"back"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
+لكل صديق تدعوه وتحصل على {REFERRAL_REWARD} نقاط!
+"""
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-#=========={سيفرات تلجرام جاهز}=========#
-if($exdata[0] == "Buynumtele2"){
-$api=json_decode(file_get_contents("https://TG-Lion.net?action=country_info&apiKey=$apiKay_Lion&YourID=$Your_ID"),1);
-$add=$exdata[1];
-$APP = str_replace(["1","2","3"],["السيرفر 1","السيرفر 2","السيرفر 3"],$add);
-$a=0;//keyboard
-$b=0;//count
-foreach($api['countries'] as $zero=>$num){
-if($num['add'] == $add){
-$price=$num['price'];
-$profit_price = $price + ($price * $profit_price_sale / 100);
-$country = $num['country'];
-$code = $num['code'];
-$name = $num['name'];
-$b++;
-if($b%2!=0){
-$key[inline_keyboard][$a][]=[text=>"$name | $$profit_price | $code",callback_data=>"bte-$code"];
-}else{
-$a++;
-$key[inline_keyboard][$a][]=[text=>"$name | $$profit_price | $code",callback_data=>"bte-$code"];
-}
-}
-}
-$key['inline_keyboard'][] = [['text'=>'رجوع','callback_data'=>"Buyxvx"]];
-$keyboad      = json_encode($key);
-if($price == null){
-bot('answercallbackquery',[
-'callback_query_id'=>$update->callback_query->id,
-'text'=>"- عذرا لايوجد دول حاليا في هذا السيفر",
-'show_alert'=>false,
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-✅ شراء حسابات Telegram جاهزة
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = get_user(query.from_user.id)
+    if not user:
+        await query.edit_message_text("⚠️ لم يتم العثور على بيانات المستخدم")
+        return
+    
+    remaining = DAILY_LIMIT - (user['usage_count'] if user['last_used'] and 
+                              (datetime.now() - datetime.fromisoformat(user['last_used'])) < timedelta(days=1) else 0)
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
+    ]
+    
+    text = f"""
+📊 إحصائياتك:
 
-- السيرفر: ($APP) 
-- رصيدك حسابك: $Balance دولار
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>($keyboad),
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-#=========={note}==========#
-if($exdata[0] == "bte"){
-$codes = $exdata[1];
-$api=json_decode(file_get_contents("https://TG-Lion.net?action=country_info&apiKey=$apiKay_Lion&YourID=$Your_ID&country_code=$codes"),1);
-$price=$api[price];
-$profit_price = $price + ($price * $profit_price_sale / 100);
-$add = $api[add];
-$name = $api[name];
-$APP = str_replace(["1","2","3"],["السيـرفر 1","السيـرفر 2","السيـرفر 3"],$add);
-$BALANCE = $Balance - $price;
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-❤ مرحبا عزيزي انت الان علا وشك شراء رقم جاهز لتفعيل Telegram
-✅
-- سعر الرقم | $$profit_price 
-- الدولة | $name
-- السيرفر | ($APP) 
-",
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'شراء حساب','callback_data'=>"getNumber-$codes-$profit_price"]],
-[['text'=>' رجوع ','callback_data'=>"Buynumtele2-$add"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-#=========={Buy Site}==========#
-if($exdata[0] == "getNumber"){
-$codes = $exdata[1];
-$profit_price = $exdata[2];
-$api=json_decode(file_get_contents("https://TG-Lion.net?action=country_info&apiKey=$apiKay_Lion&YourID=$Your_ID&country_code=$codes"),1);
+• النقاط: {user['points']}
+• المحاولات المتبقية اليوم: {remaining}/{DAILY_LIMIT}
+• عدد الأحالات: {user['referrals_count']}
+• تاريخ الانضمام: {user['join_date']}
+"""
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-if($Balance < $profit_price){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- رصيدك غير كافي $Balance",
-'show_alert'=>false,
-]);
-exit;
-}
+async def handle_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_data = get_user(user.id)
+    
+    if not user_data or user_data['is_banned']:
+        await update.message.reply_text("⚠️ حسابك غير نشط أو محظور!")
+        return
+    
+    if not can_use_bot(user.id):
+        await update.message.reply_text(f"⚠️ لقد استخدمت جميع محاولاتك اليومية ({DAILY_LIMIT})!")
+        return
+    
+    url = update.message.text.strip()
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text("⚠️ يرجى إرسال رابط يبدأ بـ http:// أو https://")
+        return
+    
+    msg = await update.message.reply_text("🔄 جاري معالجة الموقع...")
+    
+    try:
+        zip_path = await scrape_website(url, user.id)
+        record_usage(user.id)
+        
+        with open(zip_path, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=f,
+                filename="website.zip",
+                caption=f"✅ تم الاستخراج بنجاح\nالنقاط: {user_data['points']} | المحاولات المتبقية: {DAILY_LIMIT - get_user(user.id)['usage_count']}"
+            )
+        
+        # تنظيف الملفات المؤقتة
+        try:
+            temp_dir = os.path.dirname(zip_path)
+            for filename in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, filename)
+                os.remove(file_path)
+            os.rmdir(temp_dir)
+        except Exception as clean_err:
+            logger.error(f"Error cleaning temp files: {clean_err}")
+            
+    except Exception as e:
+        await msg.edit_text(f"❌ حدث خطأ: {str(e)}")
 
-$api2=json_decode(file_get_contents("https://TG-Lion.net?action=getNumber&apiKey=$apiKay_Lion&YourID=$Your_ID&country_code=$codes"),1);
-$price=$api[price];
-$profit_price = $price + ($price * $profit_price_sale / 100);
-$add = $api[add];
-$name = $api[name];
-$cod = $api2[cod]; 
-$status = $api2[status]; 
-$number = $api2[Number]; 
-$APP = str_replace(["1","2","3"],["السيرفر 1","السيرفر 2","السيرفر 3"],$add);
-$idSend=$ordertelemy;
+# ------------------- نظام إدارة القنوات -------------------
+async def admin_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id, username, title FROM channels")
+    channels = cursor.fetchall()
+    conn.close()
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة قناة", callback_data=CALLBACK_ADD_CHANNEL)],
+        [InlineKeyboardButton("➖ حذف قناة", callback_data=CALLBACK_REMOVE_CHANNEL)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]
+    ]
+    
+    text = "🛠 إدارة القنوات:\n\nالقنوات المسجلة:\n"
+    if channels:
+        for channel in channels:
+            text += f"- {channel[2]} (@{channel[1]}) - ID: {channel[0]}\n"
+    else:
+        text += "لا توجد قنوات مسجلة"
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-if($cod == 205){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- عذرا انتهى مخزون هذه الدولة",
-'show_alert'=>false,
-]);
-exit;
-}
-if($cod == 201){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- يبدو ان اموال قائد الروبوت تحتاج تجديد",
-'show_alert'=>false,
-]);
-exit;
-}
-if($status == 'error'){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- تم رفض الرقم قم بالشراء مرة اخرى",
-'show_alert'=>false,
-]);
-exit;
-}
-// اضمن مرور الرقم مع علامة + ي جني
-$numbeer = $number;
-if(strpos($numbeer, '+') !== 0) {
-$numbeer = '+' . $numbeer;
-}
-$number = str_replace(' ', '', $numbeer);
-#__________
-if($cod == null and $number != null){
-$mr = file_get_contents("ID/$id/points.txt");// مسار رصيد المرسل
-$ok = $mr - $profit_price;
-$get=bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-✅ تم جلب الرقم بنجاح: 
-➖ الدولة : $name 
-➖ الرقم : `$number` ☎️
-➖ السيـرفر : $APP 🍷
-➖ السعر : $profit_price دولار 
-➖ الكود : قيد الانتظار 📩
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>' جلب كود ','callback_data'=>"getCode-$codes-$number"]]
-]
-])
-]);
-bot('sendMessage',[
-'chat_id'=>$buy_out,
-'text'=>"
-✅ تم شراء رقم بنجاح.. 
-- الدولة: $name
-- الرقم:  $number
-- العميل : $id 
-- تم خصم : $profit_price دولار
-- رصيد العضو: $ok
-- السيـرفر : $APP 
+async def add_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "📌 أرسل معرف القناة أو رابطها الآن (مثال: @channelname أو https://t.me/channelname)",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 رجوع", callback_data=CALLBACK_ADMIN_CHANNELS)]
+        ])
+    )
+    context.user_data['awaiting_channel'] = True
 
-",
-'parse_mode'=>"MarkDown",
-]);
-file_put_contents("ID/$id/points.txt",$ok);
-unlink("data/id/$id/step.txt");
-exit;
-}
-}
-#=========={جزء طلب كود وطلب كود اخر ي ابني}==========#
-if($exdata[0] == "getCode"){
-$codes=$exdata[1];
-$number=$exdata[2];
-$api=json_decode(file_get_contents("https://TG-Lion.net?action=country_info&apiKey=$apiKay_Lion&YourID=$Your_ID&country_code=$codes"),1);
-$api3=json_decode(file_get_contents("https://TG-Lion.net?action=getCode&number=$number&apiKey=$apiKay_Lion&YourID=$Your_ID"),1);//اذا كنت تريد ان يقوم بجلب الكود وتسجيل الخروج مباشرة مرر هذة القيمة &logout_now=yes عند جلب الكود
-$price=$api[price];
-$profit_price = $price + ($price * $profit_price_sale / 100);
-$add = $api[add];
-$name = $api[name];
-$code = $api3[code];
-$pass = $api3[pass];
-$cod = $api3[cod]; 
-$message = $api3[message]; 
-$status = $api3[status]; 
-$APP = str_replace(["1","2","3"],["السيرفر 1","السيرفر 2","السيرفر 3"],$add);
-if($codes == null or $number == null){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-- عذرا حدث خطا الدولة او الرقم غير معرف بالنظام
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>' رجوع ','callback_data'=>"Buynumtele2-$add"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-if($code == null and $status == "ok"){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- لم يصل كود لهذا الرقم تأكد من طلب الكود بالطريقة الصحيحة",
-'show_alert'=>false,
-]);
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-➖ الدولة : $name 
-➖ الرقم : `$number` ☎️
-➖ السيـرفر : $APP 
-➖ السعر : $profit_price دولار 
-➖ الكود : قيد الانتظار 📩
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>" جلب الكود ",'callback_data'=>"getCode-$codes-$number"]], 
-[['text'=>"Logout",'callback_data'=>"logout-$codes-$number"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-if($status != "ok"){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"- وضيفة مرفوضة: $message",
-'show_alert'=>false,
-]);
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-➖ الدولة : $name 
-➖ الرقم : `$number` ☎️
-➖ السيـرفر : $APP 
-➖ السعر : $profit_price دولار 
-➖ الكود : قيد الانتظار 📩
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>" جلب الكود ",'callback_data'=>"getCode-$codes-$number"]],
-[['text'=>"Logout",'callback_data'=>"logout-$codes-$number"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-if($status == "ok" and $code != null){
-bot('answercallbackquery',[
-'callback_query_id' => $update->callback_query->id,
-'text'=>"✅ تم وصول الكود بنجاح! رصيدك: $Balance دولار",
-'show_alert'=>false,
-]);
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-✅ تم وصول رسالة الكود بنجاح ✅
-➖ الدولة : $name 
-➖ السيـرفر : $APP 
-➖ الرقم : `$number` ☎️
-➖ الكود : `$code` 💚
-➖ السعر : $$profit_price
+async def handle_channel_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'awaiting_channel' in context.user_data:
+        channel_input = update.message.text.strip()
+        
+        # استخراج معرف القناة من المدخلات
+        if channel_input.startswith("https://t.me/"):
+            channel_username = channel_input.split("/")[-1]
+        elif channel_input.startswith("@"):
+            channel_username = channel_input[1:]
+        else:
+            channel_username = channel_input
+        
+        # هنا يجب إضافة التحقق من أن البوت مشرف في القناة
+        # لكن هذا يتطلب واجهة برمجة تطبيقات خاصة
+        
+        try:
+            # الحصول على معلومات القناة
+            chat = await context.bot.get_chat(f"@{channel_username}")
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO channels 
+                (channel_id, username, title, added_by, add_date)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (chat.id, chat.username, chat.title, update.effective_user.id, datetime.now().isoformat()))
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ تمت إضافة القناة {chat.title} (@{chat.username}) بنجاح",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("العودة لإدارة القنوات", callback_data=CALLBACK_ADMIN_CHANNELS)]
+                ])
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ في إضافة القناة: {str(e)}")
+        
+        del context.user_data['awaiting_channel']
 
-➖ تم خصم $$profit_price من رصيدك 
-➖ المتبقي في رصيدك : $Balance دولار 
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>"طلب الكود مرة أخرى",'callback_data'=>"getCode-$codes-$number"]],
-[['text'=>"Logout",'callback_data'=>"logout-$codes-$number"]]
-]
-])
-]);
-bot('SendMessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-⬇️ تم وصول الكود بنجاح بوت $bot_name
+async def remove_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id, username, title FROM channels")
+    channels = cursor.fetchall()
+    conn.close()
+    
+    if not channels:
+        await query.edit_message_text(
+            "⚠️ لا توجد قنوات مسجلة للحذف",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 رجوع", callback_data=CALLBACK_ADMIN_CHANNELS)]
+            ])
+        )
+        return
+    
+    keyboard = []
+    for channel in channels:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"حذف {channel[2]}",
+                callback_data=f"remove_channel_{channel[0]}"
+            )
+        ])
+    
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CALLBACK_ADMIN_CHANNELS)])
+    
+    await query.edit_message_text(
+        "اختر القناة التي تريد حذفها:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-✅ 𝐍𝗨𝐌𝐁𝐄𝐑 : `$number`
-💬 𝐂𝐎𝐃𝐄 : `$code`
-🔐 𝐏𝐀𝐒𝐒 : `$pass`
-",
-'parse_mode'=>"MarkDown",
-'reply_message_id'=>$message_id,
-]);
-bot('sendMessage',[
-'chat_id'=>$PAY,
-'text'=>"
-- الدولة:  $name 
-- ايدي:  `$id` 
-- الرقم:  $number 
-- الكود:  $code 
-- السعر:  $$profit_price
-- السيـرفر : $APP 
-- المتبقي في رصيدة: $$Balance
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: int):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # الحصول على معلومات القناة قبل الحذف
+        cursor.execute("SELECT username, title FROM channels WHERE channel_id = ?", (channel_id,))
+        channel = cursor.fetchone()
+        
+        if not channel:
+            await query.edit_message_text("❌ القناة غير موجودة")
+            return
+        
+        # حذف القناة
+        cursor.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+        conn.commit()
+        
+        await query.edit_message_text(
+            f"✅ تم حذف القناة {channel[1]} (@{channel[0]}) بنجاح",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("العودة لإدارة القنوات", callback_data=CALLBACK_ADMIN_CHANNELS)]
+            ])
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ خطأ في حذف القناة: {str(e)}")
+    finally:
+        conn.close()
 
-- الاستلام: $DAY3 📥
-- كود التفعيل: $code 
-- التحقق بخطوتين: $pass 
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>" تواصل مع العميل ",'url'=>"tg://openmessage?user_id=$id"]]
-]
-])
-]);
-$iddd=substr($id, 0,-3)."";
-$hnum=substr($number, 0,-4)."";
-function sp ($value)
-{
-    return "<span class=\"tg-spoiler\">$value</span>";
-}
-bot('SendMessage',[
-'chat_id'=>$activation,
-'text'=>"
-✅ تم شراء رقم بنجاح. 
+# ------------------- نظام الإذاعة -------------------
+async def admin_broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 0")
+    active_users = cursor.fetchone()[0]
+    conn.close()
+    
+    keyboard = [
+        [InlineKeyboardButton("📢 إرسال إذاعة", callback_data="start_broadcast")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]
+    ]
+    
+    text = f"""
+📢 نظام الإذاعة:
 
-• الدولة : $name 
-• السعر : $$profit_price
-• السيـرفر : $APP 
-• الرقم  : ×××$hnum 
-• العميل : " . sp($iddd) . " 🆔
+عدد المستخدمين النشطين: {active_users}
 
-• المرسل :  Telegram  
-• كود التفعيل : $code
-",
-'disable_web_page_preview'=>true,
-'parse_mode'=>"html",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text' => " شراء رقم من البوت ↗️ ", 'url' => "http://t.me/TGLionAPI_bot"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-}
-}
-#=========={logout Site}==========#
-if($exdata[0] == "logout"){
-$codes=$exdata[1];
-$number=$exdata[2];
-$api=json_decode(file_get_contents("https://TG-Lion.net?action=available_countries&apiKey=$apiKay_Lion&YourID=$Your_ID"),1);
-$price=$api[price];
-$profit_price = $price + ($price * $profit_price_sale / 100);
-$add = $api[add];
-$name = $api[name];
-$APP = str_replace(["1","2","3"],["السيرفر 1","السيرفر 2","السيرفر 3"],$add);
-$api4=json_decode(file_get_contents("https://TG-Lion.net?action=logout_number&number=$number&apiKey=$apiKay_Lion&YourID=$Your_ID"),1);
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-- الرقم: `$number`
-- الدولة: $name
-- البرنامج: تيليجرام
+يمكنك إرسال رسالة إلى جميع المستخدمين النشطين (غير المحظورين) في البوت.
+"""
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-✅ تم تسجيل الخروج من الرقم بنجاح!
-",
-'parse_mode'=>"MarkDown",
-'reply_markup'=>json_encode([
-'inline_keyboard'=>[
-[['text'=>'شراء مرة اخرى','callback_data'=>"getNumber-$codes"]],
-[['text'=>' رجوع ','callback_data'=>"Buynumtele2-$add"]]
-]
-])
-]);
-bot('sendMessage',[
-'chat_id'=>$buy_out,
-'text'=>"
-🔓 تم تسجيل خروج رقم جاهز
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "📝 أرسل الرسالة التي تريد إذاعتها الآن (يمكن أن تكون نص، صورة، فيديو، الخ)",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("إلغاء", callback_data=CALLBACK_CANCEL_BROADCAST)]
+        ])
+    )
+    context.user_data['broadcasting'] = True
 
-• الدولة: $name 
-• الرقم:  $number 
-• سعر الرقم:  $$profit_price 
-• ايدي العضو: $id
-• رصيد العضو: $Balance 
-• السيرفر : $APP 
-",
-'parse_mode'=>"MarkDown",
-]);
-unlink("data/id/$id/step.txt");
-exit;
-}
-///////////// النهايه لقصه الحب هذه 
+async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'broadcasting' in context.user_data:
+        message = update.message
+        
+        # حفظ الرسالة في context للإستخدام لاحقاً
+        context.user_data['broadcast_message'] = message
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ تأكيد الإرسال", callback_data=CALLBACK_CONFIRM_BROADCAST)],
+            [InlineKeyboardButton("❌ إلغاء", callback_data=CALLBACK_CANCEL_BROADCAST)]
+        ]
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 0")
+        active_users = cursor.fetchone()[0]
+        conn.close()
+        
+        await message.reply_text(
+            f"⚠️ هل أنت متأكد من أنك تريد إرسال هذه الرسالة إلى {active_users} مستخدم؟\n\n"
+            "محتوى الرسالة:\n" + (message.text or message.caption or "ملف مرفق"),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
+async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if 'broadcast_message' not in context.user_data:
+        await query.edit_message_text("❌ لم يتم العثور على رسالة للإذاعة")
+        return
+    
+    message = context.user_data['broadcast_message']
+    await query.edit_message_text("🔄 جاري إرسال الرسالة إلى جميع المستخدمين...")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = cursor.fetchall()
+    conn.close()
+    
+    success = 0
+    failed = 0
+    
+    for user in users:
+        try:
+            if message.text:
+                await context.bot.send_message(
+                    chat_id=user[0],
+                    text=message.text
+                )
+            elif message.photo:
+                await context.bot.send_photo(
+                    chat_id=user[0],
+                    photo=message.photo[-1].file_id,
+                    caption=message.caption
+                )
+            elif message.video:
+                await context.bot.send_video(
+                    chat_id=user[0],
+                    video=message.video.file_id,
+                    caption=message.caption
+                )
+            elif message.document:
+                await context.bot.send_document(
+                    chat_id=user[0],
+                    document=message.document.file_id,
+                    caption=message.caption
+                )
+            success += 1
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {user[0]}: {e}")
+            failed += 1
+    
+    # تسجيل الإذاعة في قاعدة البيانات
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO broadcasts 
+        (admin_id, message, sent_date, users_count)
+        VALUES (?, ?, ?, ?)
+    ''', (
+        update.effective_user.id,
+        message.text or message.caption or "ملف مرفق",
+        datetime.now().isoformat(),
+        success
+    ))
+    conn.commit()
+    conn.close()
+    
+    # تنظيف البيانات المؤقتة
+    del context.user_data['broadcasting']
+    del context.user_data['broadcast_message']
+    
+    await query.edit_message_text(
+        f"✅ تم إرسال الرسالة بنجاح\n\n"
+        f"✅ تمت بنجاح: {success}\n"
+        f"❌ فشل في الإرسال: {failed}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("العودة للوحة التحكم", callback_data="admin_panel")]
+        ])
+    )
 
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if 'broadcasting' in context.user_data:
+        del context.user_data['broadcasting']
+    if 'broadcast_message' in context.user_data:
+        del context.user_data['broadcast_message']
+    
+    await query.edit_message_text(
+        "❌ تم إلغاء عملية الإذاعة",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("العودة للوحة التحكم", callback_data="admin_panel")]
+        ])
+    )
 
+# ------------------- أوامر الأدمن -------------------
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ هذا الأمر للمشرف فقط!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 الإحصائيات", callback_data=CALLBACK_ADMIN_STATS)],
+        [InlineKeyboardButton("📢 إذاعة", callback_data=CALLBACK_ADMIN_BROADCAST)],
+        [InlineKeyboardButton("🛠 إدارة القنوات", callback_data=CALLBACK_ADMIN_CHANNELS)],
+        [InlineKeyboardButton("👤 إدارة المستخدمين", callback_data=CALLBACK_ADMIN_USERS)]
+    ]
+    
+    await update.message.reply_text(
+        "👨‍💻 لوحة التحكم الإدارية:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # إحصائيات المستخدمين
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+    banned_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM users WHERE date(join_date) = date('now')")
+    new_today = cursor.fetchone()[0]
+    
+    # إحصائيات الاستخدام
+    cursor.execute("SELECT SUM(usage_count) FROM users")
+    total_usage = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT COUNT(*) FROM referrals")
+    total_referrals = cursor.fetchone()[0]
+    
+    # إحصائيات القنوات
+    cursor.execute("SELECT COUNT(*) FROM channels")
+    total_channels = cursor.fetchone()[0]
+    
+    # إحصائيات البث
+    cursor.execute("SELECT COUNT(*) FROM broadcasts")
+    total_broadcasts = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    keyboard = [
+        [InlineKeyboardButton("👤 إدارة المستخدمين", callback_data=CALLBACK_ADMIN_USERS)],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]
+    ]
+    
+    text = f"""
+📊 إحصائيات البوت:
 
+👥 المستخدمون:
+- الإجمالي: {total_users}
+- المحظورون: {banned_users}
+- الجدد اليوم: {new_today}
 
-#====================================================#
-#====================================================#
-#====================================================#
-#==================== واجه تحكم الادارة ==================#
-if($id == $Your_ID){
-if($text == '/admin'){
-bot('sendMessage',[
-'chat_id'=>$chat_id,
-'text'=>"
-💻: هذه لوحة التحكم الخاصة بإدارة الروبوت
-",
-'reply_to_message_id'=>$message_id,
-'reply_markup'=>json_encode([ 
-'inline_keyboard'=>[
-[['text'=>"شحن رصيد",'callback_data'=>"TTT"],['text'=>"خصم رصيد",'callback_data'=>"LLL"]],
-[['text'=>"عرض الدول المتوفرة",'callback_data'=>"Available_tele"]], 
-[['text'=>"✅ نظام تأكيد ورفظ الارقام ✅",'callback_data'=>"Pending_Numbers"]]
+📈 الاستخدام:
+- إجمالي المحاولات: {total_usage}
+- إجمالي الإحالات: {total_referrals}
 
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-}
-}
-// لرجوع
-if($data == 'AA'){
-bot('EditMessageText',[
-'chat_id'=>$chat_id,
-'message_id'=>$message_id,
-'text'=>"
-💻: هذه لوحة التحكم الخاصة بإدارة الروبوت
-",
-'reply_to_message_id'=>$message_id,
-'reply_markup'=>json_encode([ 
-'inline_keyboard'=>[
-[['text'=>"شحن رصيد",'callback_data'=>"TTT"],['text'=>"خصم رصيد",'callback_data'=>"LLL"]],
-[['text'=>"عرض الدول المتوفرة",'callback_data'=>"Available_tele"]]
-]
-])
-]);
-unlink("data/id/$id/step.txt");
-}
-//////
-include("admin.php");
-//////
-?>
+📢 الإذاعة:
+- عدد الإذاعات: {total_broadcasts}
+
+🛠 القنوات:
+- عدد القنوات: {total_channels}
+"""
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def admin_users_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, first_name, is_banned FROM users ORDER BY join_date DESC LIMIT 10")
+    users = cursor.fetchall()
+    conn.close()
+    
+    text = "👥 آخر 10 مستخدمين:\n"
+    keyboard = []
+    
+    for user in users:
+        status = "⛔ محظور" if user[3] else "✅ نشط"
+        text += f"\n- {user[0]} {user[2]} (@{user[1]}) - {status}"
+        
+        # أزرار الحظر/فك الحظر
+        if user[3]:  # إذا كان محظوراً
+            keyboard.append([InlineKeyboardButton(
+                f"فك حظر {user[0]}",
+                callback_data=f"{CALLBACK_UNBAN_USER}_{user[0]}"
+            )])
+        else:
+            keyboard.append([InlineKeyboardButton(
+                f"حظر {user[0]}",
+                callback_data=f"{CALLBACK_BAN_USER}_{user[0]}"
+            )])
+    
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=CALLBACK_ADMIN_STATS)])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ------------------- معالجة الأخطاء -------------------
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هاندلر للأخطاء العامة"""
+    logger.error(f"حدث خطأ: {context.error}", exc_info=context.error)
+    
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ حدث خطأ غير متوقع. الرجاء المحاولة لاحقاً."
+            )
+        except Exception as e:
+            logger.error(f"Error in error handler while sending message: {e}")
+
+# ------------------- تشغيل البوت -------------------
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # الأوامر الأساسية
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("ban", ban_user_cmd))
+    app.add_handler(CommandHandler("unban", unban_user_cmd))
+    
+    # معالجة الرسائل
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_scrape))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_channel_input))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast_message))
+    
+    # معالجة الأزرار
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # معالجة الأخطاء
+    app.add_error_handler(error_handler)
+    
+    logger.info("🤖 البوت يعمل الآن...")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
